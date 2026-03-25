@@ -1,0 +1,33 @@
+# VeriFi default configuration
+# Override via environment variables (VERIFI_ prefix)
+
+device:
+  preferred: auto  # auto | mps | cuda | cpu
+
+sampling:
+  frame_budget: 30
+  scene_threshold: 30.0
+  transition_margin: 2
+  min_laplacian_var: 100.0
+  min_face_confidence: 0.95
+
+detector:
+  clip_weight_path: data/weights/clip_vit_l14_deepfake.torchscript
+  effnet_weight_path: data/weights/efficientnet_b4_ff.pth
+  clip_input_size: 224
+  effnet_input_size: 380
+
+ensemble:
+  clip_weight: 0.45
+  effnet_weight: 0.30
+  frequency_weight: 0.15
+  temporal_weight: 0.10
+  suspicious_threshold: 0.30
+  manipulated_threshold: 0.70
+
+explainer:
+  model: claude-sonnet-4-20250514
+  max_heatmap_frames: 5
+  max_tokens: 1500
+
+max_video_duration_sec: 600
