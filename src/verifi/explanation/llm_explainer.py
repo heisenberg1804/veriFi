@@ -6,7 +6,7 @@ It replaces the Claude-only version with a backend-agnostic design.
 
 Usage:
     # Local development (free, no API key needed)
-    explainer = create_explainer(backend="ollama", model="llama3.1")
+    explainer = create_explainer(backend="ollama", model="qwen3:8b")
 
     # Production (higher quality explanations)
     explainer = create_explainer(backend="claude", model="claude-sonnet-4-20250514")
@@ -117,7 +117,7 @@ class OllamaExplainer(BaseExplainer):
 
     Requirements:
       - Ollama running: `ollama serve`
-      - Model pulled: `ollama pull llama3.1` (or your preferred model)
+      - Model pulled: `ollama pull qwen3:8b` (or your preferred model)
 
     Recommended models for 16GB M3 Air:
       - llama3.1:8b      — best quality/speed tradeoff (~5GB RAM)
@@ -132,7 +132,7 @@ class OllamaExplainer(BaseExplainer):
 
     def __init__(
         self,
-        model: str = "llama3.1",
+        model: str = "qwen3:8b",
         base_url: str = "http://localhost:11434",
         timeout: float = 120.0,
     ):
@@ -357,13 +357,13 @@ def create_explainer(
     Args:
         backend: "ollama" (local, free) or "claude" (API, paid)
         model: Model name. Defaults:
-               - ollama: "llama3.1"
+               - ollama: "qwen3:8b"
                - claude: "claude-sonnet-4-20250514"
         **kwargs: Passed to the backend constructor.
 
     Examples:
         # Development (free)
-        explainer = create_explainer("ollama", "llama3.1")
+        explainer = create_explainer("ollama", "qwen3:8b")
 
         # Faster iteration with smaller model
         explainer = create_explainer("ollama", "llama3.2:3b")
@@ -375,7 +375,7 @@ def create_explainer(
         explainer = create_explainer("claude")
     """
     if backend == "ollama":
-        return OllamaExplainer(model=model or "llama3.1", **kwargs)
+        return OllamaExplainer(model=model or "qwen3:8b", **kwargs)
     elif backend == "claude":
         return ClaudeExplainer(model=model or "claude-sonnet-4-20250514", **kwargs)
     else:
