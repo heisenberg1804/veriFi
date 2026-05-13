@@ -470,13 +470,19 @@ class ForensicInvestigator:
             verdict="SUSPICIOUS",
             confidence=0.5,
             manipulation_type="unknown",
-            summary=f"Investigation completed with {len(steps)} tool calls. LLM did not produce structured output.",
+            summary=(
+                f"Investigation completed with {len(steps)} tool calls. "
+                f"LLM did not produce structured output."
+            ),
             evidence=findings,
             investigation_trace=[
                 f"Step {s.step_number}: {s.tool_name} → {s.result_summary}"
                 for s in steps
             ],
-            caveats=["LLM failed to produce structured JSON report — findings are raw tool outputs"],
+            caveats=[
+                "LLM failed to produce structured JSON report"
+                " — findings are raw tool outputs"
+            ],
             recommended_action="Manual review of tool results recommended",
             steps=steps,
             total_time_sec=total_time,

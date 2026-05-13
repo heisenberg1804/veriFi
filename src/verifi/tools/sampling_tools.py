@@ -92,7 +92,10 @@ class ZoomRegionTool(Tool):
                 "image": zoomed,
                 "original_region": {"x": x, "y": y, "w": width, "h": height},
                 "scale_factor": round(target_size / max(width, height), 2),
-                "summary": f"Zoomed into region ({x},{y},{width},{height}) → {target_size}x{target_size}",
+                "summary": (
+                    f"Zoomed into region ({x},{y},{width},{height})"
+                    f" → {target_size}x{target_size}"
+                ),
             },
         )
 
@@ -180,7 +183,10 @@ class SampleFramesTool(Tool):
                 "frames": frames,
                 "num_extracted": len(frames),
                 "time_range": f"{start_sec:.1f}s - {end_sec:.1f}s",
-                "summary": f"Extracted {len(frames)} frames from {start_sec:.1f}s to {end_sec:.1f}s",
+                "summary": (
+                    f"Extracted {len(frames)} frames"
+                    f" from {start_sec:.1f}s to {end_sec:.1f}s"
+                ),
             },
         )
 
@@ -304,7 +310,11 @@ class CheckMetadataTool(Tool):
         suspicious_tags = {}
         for key, value in all_tags.items():
             key_lower = key.lower()
-            if any(kw in key_lower for kw in ["encoder", "handler", "software", "creator", "comment"]):
+            gen_keywords = [
+                "encoder", "handler", "software",
+                "creator", "comment",
+            ]
+            if any(kw in key_lower for kw in gen_keywords):
                 suspicious_tags[key] = value
 
         summary_parts = [

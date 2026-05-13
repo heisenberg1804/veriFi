@@ -217,3 +217,4 @@ class GradCAMGenerator:
             generated=len(results),
         )
         return results
+

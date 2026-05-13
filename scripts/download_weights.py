@@ -1,6 +1,5 @@
 """Download pre-trained model weights for VeriFi."""
 import subprocess
-import sys
 from pathlib import Path
 
 WEIGHTS_DIR = Path("data/weights")

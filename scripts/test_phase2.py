@@ -42,7 +42,10 @@ def main(video_path: str):
     meta = result.metadata
     print(f"  [OK] {meta.filename}")
     print(f"       Duration: {meta.duration_sec:.1f}s | {meta.resolution} | {meta.fps:.1f} fps")
-    print(f"       Codec: {meta.codec} | Audio: {meta.has_audio} | Size: {meta.file_size_mb:.1f} MB")
+    print(
+        f"       Codec: {meta.codec} | Audio: {meta.has_audio}"
+        f" | Size: {meta.file_size_mb:.1f} MB"
+    )
     print(f"       Hash: {meta.file_hash}")
     if result.warnings:
         for w in result.warnings:
@@ -54,9 +57,15 @@ def main(video_path: str):
     t0 = time.perf_counter()
     scene_analysis = detect_scenes(video_path)
 
-    print(f"  [OK] {scene_analysis.num_scenes} scene(s) detected, {len(scene_analysis.boundaries)} boundary(ies)")
+    print(
+        f"  [OK] {scene_analysis.num_scenes} scene(s) detected,"
+        f" {len(scene_analysis.boundaries)} boundary(ies)"
+    )
     for s in scene_analysis.scenes:
-        print(f"       Scene {s.scene_id}: {s.start_sec:.1f}s → {s.end_sec:.1f}s ({s.frame_count} frames)")
+        print(
+            f"       Scene {s.scene_id}: {s.start_sec:.1f}s"
+            f" → {s.end_sec:.1f}s ({s.frame_count} frames)"
+        )
     print(f"       Time: {time.perf_counter() - t0:.2f}s")
 
     # ── Stage 3: Smart frame selection ──

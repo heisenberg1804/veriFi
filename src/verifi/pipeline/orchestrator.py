@@ -29,6 +29,7 @@ from verifi.config import AppConfig
 from verifi.detectors.clip_detector import CLIPDeepfakeDetector
 from verifi.detectors.effnet_detector import EfficientNetDetector
 from verifi.detectors.frequency import FrequencyAnalyzer
+from verifi.detectors.noise_residual import NoiseResidualAnalyzer
 from verifi.detectors.temporal import TemporalAnalyzer
 from verifi.ensemble.aggregator import (
     EnsembleWeights,
@@ -120,6 +121,7 @@ class VeriFiPipeline:
         self._effnet: EfficientNetDetector | None = None
         self._face_pipeline: FaceDetectionPipeline | None = None
         self._freq = FrequencyAnalyzer()
+        self._noise_residual = NoiseResidualAnalyzer()
         self._temporal = TemporalAnalyzer()
         self._gradcam = GradCAMGenerator(device=self.device)
         self._models_loaded = False
@@ -168,6 +170,7 @@ class VeriFiPipeline:
         self,
         video_path: str,
         output_dir: str | Path | None = None,
+        skip_explainability: bool = False,
     ) -> ForensicReport:
         """
         Run the complete analysis pipeline on a video.
@@ -254,6 +257,12 @@ class VeriFiPipeline:
             face_clip=self.config.ensemble.clip_weight,
             face_effnet=self.config.ensemble.effnet_weight,
             face_dct=self.config.ensemble.frequency_weight,
+            face_noise_residual=self.config.ensemble.noise_residual_weight,
+            frame_clip=self.config.ensemble.clip_weight,
+            frame_dct=self.config.ensemble.frequency_weight,
+            frame_noise_residual=self.config.ensemble.noise_residual_weight,
+            frame_channel_corr=self.config.ensemble.channel_corr_weight,
+            frame_temporal=self.config.ensemble.temporal_weight,
             suspicious_threshold=self.config.ensemble.suspicious_threshold,
             manipulated_threshold=self.config.ensemble.manipulated_threshold,
         )
@@ -262,17 +271,21 @@ class VeriFiPipeline:
         timings.ensemble = time.perf_counter() - t0
 
         # ── Stage 9: GradCAM on flagged frames ──
-        t0 = time.perf_counter()
-        heatmap_paths = self._generate_heatmaps(frames, analysis, output_dir)
-        timings.gradcam = time.perf_counter() - t0
+        heatmap_paths = []
+        forensic_paths = []
+        timeline_path = None
+        if not skip_explainability:
+            t0 = time.perf_counter()
+            heatmap_paths = self._generate_heatmaps(frames, analysis, output_dir)
+            timings.gradcam = time.perf_counter() - t0
 
-        # ── Stage 10: Forensic views + timeline ──
-        t0 = time.perf_counter()
-        forensic_paths = self._generate_forensic_views(
-            frames, analysis, heatmap_paths, output_dir
-        )
-        timeline_path = self._generate_timeline(analysis, output_dir)
-        timings.forensic_views = time.perf_counter() - t0
+            # ── Stage 10: Forensic views + timeline ──
+            t0 = time.perf_counter()
+            forensic_paths = self._generate_forensic_views(
+                frames, analysis, heatmap_paths, output_dir,
+            )
+            timeline_path = self._generate_timeline(analysis, output_dir)
+            timings.forensic_views = time.perf_counter() - t0
 
         timings.total = time.perf_counter() - total_t0
 
@@ -343,11 +356,24 @@ class VeriFiPipeline:
                                 "raw_size": f"{raw_w}x{raw_h}"},
                     ))
 
-                # DCT on face crop
-                dct_result = self._freq.analyze(face.crop)
+                # DCT on face crop (with sharpness normalization)
+                face_gray = cv2.cvtColor(face.crop, cv2.COLOR_BGR2GRAY)
+                face_sharpness = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
+                dct_result = self._freq.analyze(face.crop, sharpness=face_sharpness)
                 signals.append(SignalScore(
                     name="dct", score=dct_result.score,
                     metadata=dct_result.metadata,
+                ))
+                signals.append(SignalScore(
+                    name="channel_corr",
+                    score=dct_result.metadata.get("channel_corr_score", 0.5),
+                ))
+
+                # Noise residual on face crop
+                nr_result = self._noise_residual.analyze(face.crop)
+                signals.append(SignalScore(
+                    name="noise_residual", score=nr_result.score,
+                    metadata=nr_result.metadata,
                 ))
 
                 analyses.append(FaceFrameAnalysis(
@@ -385,11 +411,24 @@ class VeriFiPipeline:
                     name="clip", score=clip_results[0].score,
                 ))
 
-            # DCT on full frame (use original resolution for better spectrum)
-            dct_result = self._freq.analyze(sf.image)
+            # DCT on full frame (with sharpness normalization)
+            frame_gray = cv2.cvtColor(sf.image, cv2.COLOR_BGR2GRAY)
+            frame_sharpness = float(cv2.Laplacian(frame_gray, cv2.CV_64F).var())
+            dct_result = self._freq.analyze(sf.image, sharpness=frame_sharpness)
             signals.append(SignalScore(
                 name="dct", score=dct_result.score,
                 metadata=dct_result.metadata,
+            ))
+            signals.append(SignalScore(
+                name="channel_corr",
+                score=dct_result.metadata.get("channel_corr_score", 0.5),
+            ))
+
+            # Noise residual on full frame
+            nr_result = self._noise_residual.analyze(sf.image)
+            signals.append(SignalScore(
+                name="noise_residual", score=nr_result.score,
+                metadata=nr_result.metadata,
             ))
 
             analyses.append(FullFrameAnalysis(

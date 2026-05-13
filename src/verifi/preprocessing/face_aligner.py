@@ -18,6 +18,6 @@ def align_face_by_eyes(
     dx = right_eye[0] - left_eye[0]
     angle = float(np.degrees(np.arctan2(dy, dx)))
     center = ((left_eye[0] + right_eye[0]) / 2, (left_eye[1] + right_eye[1]) / 2)
-    M = cv2.getRotationMatrix2D(center, angle, scale=1.0)
+    rot_mat = cv2.getRotationMatrix2D(center, angle, scale=1.0)
     h, w = image.shape[:2]
-    return cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR)
+    return cv2.warpAffine(image, rot_mat, (w, h), flags=cv2.INTER_LINEAR)

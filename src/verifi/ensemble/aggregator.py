@@ -12,7 +12,7 @@ This handles face-swap deepfakes AND fully synthetic video (Sora, Veo, etc.)
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 import numpy as np
 import structlog
@@ -20,7 +20,7 @@ import structlog
 logger = structlog.get_logger()
 
 
-class ManipulationType(str, Enum):
+class ManipulationType(StrEnum):
     NONE = "none"
     FACE_SWAP = "face_swap"
     FACE_REENACTMENT = "face_reenactment"
@@ -28,7 +28,7 @@ class ManipulationType(str, Enum):
     UNKNOWN = "unknown"
 
 
-class Verdict(str, Enum):
+class Verdict(StrEnum):
     LIKELY_AUTHENTIC = "LIKELY_AUTHENTIC"
     SUSPICIOUS = "SUSPICIOUS"
     LIKELY_MANIPULATED = "LIKELY_MANIPULATED"
@@ -37,7 +37,7 @@ class Verdict(str, Enum):
 @dataclass
 class SignalScore:
     """A single detection signal score for one frame."""
-    name: str           # "clip", "effnet", "dct", "temporal"
+    name: str           # "clip", "effnet", "dct", "channel_corr", "temporal"
     score: float        # 0.0 (authentic) → 1.0 (manipulated)
     metadata: dict = field(default_factory=dict)
 
@@ -78,6 +78,7 @@ class VideoAnalysis:
 
     # Combined verdict
     video_score: float = 0.0
+    confidence: float = 0.0
     verdict: Verdict = Verdict.LIKELY_AUTHENTIC
     manipulation_type: ManipulationType = ManipulationType.NONE
     dominant_path: str = "frame"  # "face" or "frame"
@@ -89,6 +90,7 @@ class VideoAnalysis:
     def to_dict(self) -> dict:
         return {
             "video_score": round(self.video_score, 4),
+            "confidence": round(self.confidence, 4),
             "verdict": self.verdict.value,
             "manipulation_type": self.manipulation_type.value,
             "dominant_path": self.dominant_path,
@@ -110,23 +112,94 @@ class VideoAnalysis:
 @dataclass
 class EnsembleWeights:
     """Configurable weights for each signal in each path."""
-    # Face-level path weights
-    face_clip: float = 0.45
-    face_effnet: float = 0.35
-    face_dct: float = 0.20
+    # Face-level path weights (sum = 1.0)
+    face_clip: float = 0.20
+    face_effnet: float = 0.15
+    face_dct: float = 0.30
+    face_noise_residual: float = 0.20
+    face_channel_corr: float = 0.05
+    face_temporal: float = 0.10
 
-    # Frame-level path weights
-    frame_clip: float = 0.50
-    frame_dct: float = 0.35
-    frame_temporal: float = 0.15
+    # Frame-level path weights (sum = 1.0)
+    frame_clip: float = 0.15
+    frame_dct: float = 0.30
+    frame_noise_residual: float = 0.25
+    frame_channel_corr: float = 0.05
+    frame_temporal: float = 0.25
 
-    # Verdict thresholds
-    suspicious_threshold: float = 0.30
+    # Verdict thresholds — wide SUSPICIOUS band to avoid overconfident wrong answers
+    suspicious_threshold: float = 0.35
     manipulated_threshold: float = 0.70
 
-    # How many top-K frames to average for video score
-    top_k_ratio: float = 0.20  # top 20% of frames
+    # Signal agreement bonus/penalty
+    agreement_bonus: float = 0.05
+    disagreement_penalty: float = 0.03
+
+    # Use mean of all frames — robust to per-frame noise and edge frames
+    top_k_ratio: float = 1.0
     min_top_k: int = 3
+
+
+def _weighted_score(
+    signals: list[SignalScore], weight_map: dict[str, float],
+) -> float:
+    total_w = 0.0
+    weighted_sum = 0.0
+    for sig in signals:
+        w = weight_map.get(sig.name, 0.0)
+        weighted_sum += w * sig.score
+        total_w += w
+    return weighted_sum / total_w if total_w > 0 else 0.0
+
+
+def _apply_agreement_bonus(
+    signals: list[SignalScore],
+    base_score: float,
+    weights: EnsembleWeights,
+) -> float:
+    """Reward forensic signal agreement, penalize disagreement."""
+    dct_score = None
+    nr_score = None
+    for s in signals:
+        if s.name == "dct":
+            dct_score = s.score
+        elif s.name == "noise_residual":
+            nr_score = s.score
+
+    if dct_score is None or nr_score is None:
+        return base_score
+
+    both_high = dct_score > 0.55 and nr_score > 0.55
+    disagree = (dct_score > 0.55 and nr_score < 0.40) or (
+        nr_score > 0.55 and dct_score < 0.40
+    )
+
+    if both_high:
+        return float(np.clip(base_score + weights.agreement_bonus, 0.0, 1.0))
+    if disagree:
+        return float(np.clip(base_score - weights.disagreement_penalty, 0.0, 1.0))
+    return base_score
+
+
+def _compute_confidence(score: float, weights: EnsembleWeights) -> float:
+    """Distance from nearest threshold, normalized to 0.0-1.0."""
+    lo = weights.suspicious_threshold
+    hi = weights.manipulated_threshold
+
+    if score < lo:
+        dist = lo - score
+        max_dist = lo
+    elif score >= hi:
+        dist = score - hi
+        max_dist = 1.0 - hi
+    else:
+        dist_lo = score - lo
+        dist_hi = hi - score
+        dist = min(dist_lo, dist_hi)
+        half_band = (hi - lo) / 2.0
+        return float(np.clip(1.0 - dist / half_band, 0.0, 1.0)) * 0.5
+
+    return float(np.clip(dist / max_dist, 0.0, 1.0)) if max_dist > 0 else 0.0
 
 
 def aggregate_face_signals(
@@ -144,16 +217,14 @@ def aggregate_face_signals(
         "clip": weights.face_clip,
         "effnet": weights.face_effnet,
         "dct": weights.face_dct,
+        "noise_residual": weights.face_noise_residual,
+        "channel_corr": weights.face_channel_corr,
+        "temporal": weights.face_temporal,
     }
 
     for a in analyses:
-        total_w = 0.0
-        weighted_sum = 0.0
-        for sig in a.signals:
-            w = weight_map.get(sig.name, 0.0)
-            weighted_sum += w * sig.score
-            total_w += w
-        a.ensemble_score = weighted_sum / total_w if total_w > 0 else 0.0
+        a.ensemble_score = _weighted_score(a.signals, weight_map)
+        a.ensemble_score = _apply_agreement_bonus(a.signals, a.ensemble_score, weights)
         a.flagged = a.ensemble_score > weights.suspicious_threshold
 
     scores = sorted([a.ensemble_score for a in analyses], reverse=True)
@@ -174,17 +245,14 @@ def aggregate_frame_signals(
     weight_map = {
         "clip": weights.frame_clip,
         "dct": weights.frame_dct,
+        "noise_residual": weights.frame_noise_residual,
+        "channel_corr": weights.frame_channel_corr,
         "temporal": weights.frame_temporal,
     }
 
     for a in analyses:
-        total_w = 0.0
-        weighted_sum = 0.0
-        for sig in a.signals:
-            w = weight_map.get(sig.name, 0.0)
-            weighted_sum += w * sig.score
-            total_w += w
-        a.ensemble_score = weighted_sum / total_w if total_w > 0 else 0.0
+        a.ensemble_score = _weighted_score(a.signals, weight_map)
+        a.ensemble_score = _apply_agreement_bonus(a.signals, a.ensemble_score, weights)
         a.flagged = a.ensemble_score > weights.suspicious_threshold
 
     scores = sorted([a.ensemble_score for a in analyses], reverse=True)
@@ -201,24 +269,36 @@ def infer_manipulation_type(
     """
     Heuristic to determine the type of manipulation.
 
-    Full synthesis: strong frame-level signal, weak/absent face-level signal
-    Face swap: strong face-level signal with boundary artifacts (high effnet)
-    Reenactment: moderate face-level signal with temporal anomalies
+    Uses forensic signals (noise_residual, DCT) for full-synthesis detection,
+    and face-level signals (effnet, temporal) for face manipulation.
     """
-    if face_score < 0.3 and frame_score < 0.3:
+    if face_score < 0.25 and frame_score < 0.25:
         return ManipulationType.NONE
 
-    # Frame-dominant signal → likely full synthesis
-    if frame_score > face_score + 0.15:
+    # Check frame-path forensic signals for full synthesis
+    if frame_score > 0.35 and frame_analyses:
+        nr_scores = [
+            s.score for a in frame_analyses
+            for s in a.signals if s.name == "noise_residual"
+        ]
+        dct_scores = [
+            s.score for a in frame_analyses
+            for s in a.signals if s.name == "dct"
+        ]
+        avg_nr = float(np.mean(nr_scores)) if nr_scores else 0
+        avg_dct = float(np.mean(dct_scores)) if dct_scores else 0
+        if avg_nr > 0.55 and avg_dct > 0.45:
+            return ManipulationType.FULL_SYNTHESIS
+
+    if frame_score > face_score + 0.10:
         return ManipulationType.FULL_SYNTHESIS
 
     # Face-dominant signal → face swap or reenactment
-    if face_score > 0.5 and face_analyses:
+    if face_score > 0.4 and face_analyses:
         flagged = [a for a in face_analyses if a.flagged]
         if not flagged:
             return ManipulationType.UNKNOWN
 
-        # Check if EfficientNet (artifact detector) is high → face swap
         effnet_scores = []
         temporal_scores = []
         for a in flagged:
@@ -228,8 +308,8 @@ def infer_manipulation_type(
                 if sig.name == "temporal":
                     temporal_scores.append(sig.score)
 
-        avg_effnet = np.mean(effnet_scores) if effnet_scores else 0
-        avg_temporal = np.mean(temporal_scores) if temporal_scores else 0
+        avg_effnet = float(np.mean(effnet_scores)) if effnet_scores else 0
+        avg_temporal = float(np.mean(temporal_scores)) if temporal_scores else 0
 
         if avg_effnet > 0.6:
             return ManipulationType.FACE_SWAP
@@ -295,9 +375,11 @@ def aggregate(
     else:
         verdict = Verdict.LIKELY_AUTHENTIC
 
+    confidence = _compute_confidence(video_score, weights)
+
     # Manipulation type
     manipulation_type = infer_manipulation_type(
-        face_score, frame_score, face_analyses, frame_analyses
+        face_score, frame_score, face_analyses, frame_analyses,
     )
 
     # Collect flagged indices (for GradCAM targeting)
@@ -312,6 +394,7 @@ def aggregate(
         frame_path_score=frame_score,
         frame_path_active=True,
         video_score=video_score,
+        confidence=confidence,
         verdict=verdict,
         manipulation_type=manipulation_type,
         dominant_path=dominant_path,
@@ -344,7 +427,10 @@ def compute_signal_stats(analysis: VideoAnalysis) -> dict:
     # Face path stats
     if analysis.face_analyses:
         clip_s = [s.score for a in analysis.face_analyses for s in a.signals if s.name == "clip"]
-        effnet_s = [s.score for a in analysis.face_analyses for s in a.signals if s.name == "effnet"]
+        effnet_s = [
+            s.score for a in analysis.face_analyses
+            for s in a.signals if s.name == "effnet"
+        ]
         stats["clip_mean"] = float(np.mean(clip_s)) if clip_s else 0
         stats["clip_max"] = float(np.max(clip_s)) if clip_s else 0
         stats["clip_std"] = float(np.std(clip_s)) if clip_s else 0
@@ -360,12 +446,22 @@ def compute_signal_stats(analysis: VideoAnalysis) -> dict:
     # Frame path stats
     dct_s = [s.score for a in analysis.frame_analyses for s in a.signals if s.name == "dct"]
     frame_clip_s = [s.score for a in analysis.frame_analyses for s in a.signals if s.name == "clip"]
-    temporal_s = [s.score for a in analysis.frame_analyses for s in a.signals if s.name == "temporal"]
+    temporal_s = [
+        s.score for a in analysis.frame_analyses
+        for s in a.signals if s.name == "temporal"
+    ]
 
     stats["freq_score"] = float(np.mean(dct_s)) if dct_s else 0
     dct_meta = [s.metadata for a in analysis.frame_analyses for s in a.signals if s.name == "dct"]
     hf_vals = [m.get("hf_suppression_pct", 0) for m in dct_meta if m]
     stats["hf_suppression"] = float(np.mean(hf_vals)) if hf_vals else 0
+
+    corr_s = [
+        s.score for a in analysis.frame_analyses
+        for s in a.signals if s.name == "channel_corr"
+    ]
+    stats["channel_corr_mean"] = float(np.mean(corr_s)) if corr_s else 0
+    stats["channel_corr_max"] = float(np.max(corr_s)) if corr_s else 0
 
     stats["frame_clip_mean"] = float(np.mean(frame_clip_s)) if frame_clip_s else 0
     stats["frame_clip_max"] = float(np.max(frame_clip_s)) if frame_clip_s else 0
@@ -377,6 +473,14 @@ def compute_signal_stats(analysis: VideoAnalysis) -> dict:
         )
     else:
         stats["temporal_summary"] = "Not analyzed"
+
+    # Noise residual stats
+    nr_s = [
+        s.score for a in analysis.frame_analyses
+        for s in a.signals if s.name == "noise_residual"
+    ]
+    stats["noise_residual_mean"] = float(np.mean(nr_s)) if nr_s else 0
+    stats["noise_residual_max"] = float(np.max(nr_s)) if nr_s else 0
 
     stats["av_sync_summary"] = "Not yet implemented"
 

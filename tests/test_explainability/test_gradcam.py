@@ -16,11 +16,11 @@ from verifi.explainability.gradcam import (
 
 def test_reshape_transform_correct_shape():
     """ViT reshape should produce (B, D, H, W) from (B, 1+HW, D)."""
-    B, H, W, D = 2, 16, 16, 1024
-    # Input: (B, 1 + H*W, D) — class token + patch tokens
-    tensor = torch.randn(B, 1 + H * W, D)
-    result = reshape_transform_vit(tensor, height=H, width=W)
-    assert result.shape == (B, D, H, W)
+    b, h, w, d = 2, 16, 16, 1024
+    # Input: (b, 1 + h*w, d) — class token + patch tokens
+    tensor = torch.randn(b, 1 + h * w, d)
+    result = reshape_transform_vit(tensor, height=h, width=w)
+    assert result.shape == (b, d, h, w)
 
 
 def test_reshape_transform_strips_cls_token():

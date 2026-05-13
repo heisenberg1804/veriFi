@@ -77,12 +77,10 @@ def check_cv2():
 
 
 def check_gradcam():
-    from pytorch_grad_cam import GradCAM
     return "pytorch-grad-cam imported"
 
 
 def check_facenet():
-    from facenet_pytorch import MTCNN
     return "MTCNN available"
 
 
@@ -109,7 +107,6 @@ def check_weights():
 
 def check_clip_inference():
     """The big test: can we actually run CLIP inference?"""
-    import torch
     from verifi.config import AppConfig
 
     config = AppConfig()
@@ -120,8 +117,9 @@ def check_clip_inference():
         print(f"  {WARN} CLIP weights not found at {weight_path} — skipping inference test")
         return None
 
-    from verifi.detectors.clip_detector import CLIPDeepfakeDetector
     import numpy as np
+
+    from verifi.detectors.clip_detector import CLIPDeepfakeDetector
 
     detector = CLIPDeepfakeDetector(
         weight_path=str(weight_path),
@@ -142,7 +140,11 @@ def check_clip_inference():
     elapsed = (time.perf_counter() - start) * 1000
 
     detector.unload()
-    return f"Batch of 4 on {device}: {elapsed:.0f}ms ({elapsed/4:.0f}ms/frame), scores: {[f'{r.score:.3f}' for r in results]}"
+    scores = [f"{r.score:.3f}" for r in results]
+    return (
+        f"Batch of 4 on {device}: {elapsed:.0f}ms"
+        f" ({elapsed/4:.0f}ms/frame), scores: {scores}"
+    )
 
 
 def main():
@@ -174,7 +176,7 @@ def main():
         print("Fix these before proceeding to Phase 2.")
         sys.exit(1)
     else:
-        print(f"\033[92mAll checks passed. Ready to build.\033[0m")
+        print("\033[92mAll checks passed. Ready to build.\033[0m")
         sys.exit(0)
 
 

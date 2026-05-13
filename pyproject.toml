@@ -43,6 +43,7 @@ dependencies = [
 
     # Utilities
     "structlog>=24.1",
+    "efficientnet-pytorch>=0.7",
     "langgraph>=0.2",
     "langchain-core>=0.3",
     "langchain-ollama>=0.2",
@@ -60,6 +61,10 @@ dev = [
     "pytest-cov>=4.1",
     "ruff>=0.2",
     "ipykernel>=6.28",
+    "matplotlib>=3.8",
+]
+benchmark = [
+    "scikit-learn>=1.4",
     "matplotlib>=3.8",
 ]
 
