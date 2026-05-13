@@ -18,12 +18,15 @@ The pipeline runs two independent analysis paths in parallel:
 
 The ensemble normally takes the stronger path's signal as the dominant verdict. However, a frame-path consensus override forces frame dominance when >70% of frames are flagged and frame_score exceeds the suspicious threshold — this prevents noisy face-path scores from small background faces from overriding strong frame-level synthetic detection.
 
-### Detection signals
+### Detection signals (ranked by forensic reliability)
 
-- **CLIP ViT-L/14** (semantic) — Zero-shot classification via prompt ensembling (REAL_PROMPTS vs FAKE_PROMPTS). Uses open_clip ViT-L/14 with OpenAI pretrained weights. No fine-tuned classifier head needed.
-- **EfficientNet-B4** (artifact) — Pixel-level blending boundaries, texture anomalies. Trained on FF++ via DeepfakeBench.
-- **DCT Frequency** (signal processing, no ML) — Multi-band DCT analysis: band energy ratios (low/mid/high), spectral smoothness, and periodic artifact detection. GAN/diffusion models suppress HF energy. Immune to adversarial ML attacks.
-- **Temporal Consistency** (optical flow) — Farneback optical flow between adjacent frames. Detects motion discontinuities between face region and background.
+1. **Noise Residual** (statistical, no ML) — Best single discriminator (1/10 errors on test set). Extracts noise via median-filter subtraction, analyzes spatial autocorrelation, spectral entropy, and block variance. POLARITY IS INVERTED for H.264: real multi-encoded video has HIGH autocorrelation from deblocking filters; AI single-pass encoding has LOWER autocorrelation. Ensemble weight: 0.25 (frame), 0.20 (face).
+2. **DCT Frequency** (signal processing, no ML) — Second best discriminator. Multi-band DCT analysis with sharpness-normalized scoring (sigmoid-based). Band energy ratios, spectral smoothness, periodic artifacts. AI videos show suppressed HF content relative to sharpness. Ensemble weight: 0.30.
+3. **Temporal Consistency** (multi-signal) — Flow field CV (AI has unnaturally uniform motion), inter-frame SSIM (AI is temporally too smooth), HF flicker (AI generators avoid temporal instability), face-bg divergence (face-swap detection). Combined: 0.30*flow_cv + 0.35*ssim + 0.25*flicker + 0.10*divergence. Ensemble weight: 0.25.
+4. **CLIP ViT-L/14** (semantic) — Zero-shot classification via prompt ensembling. Detects aesthetically obvious AI content but FAILS on photorealistic AI video (scores 0.27-0.55 for modern generators). Ensemble weight: 0.15 (demoted).
+5. **Cross-Channel Correlation** (signal processing, no ML) — UNRELIABLE after H.264 compression. Real 720p videos score 0.73-0.97, overlapping entirely with AI. Kept as weak tiebreaker only. Ensemble weight: 0.05.
+6. **EfficientNet-B4** (artifact) — Face-swap only. DeepfakeBench FF++ weights, not calibrated. Ensemble weight: 0.15 (face path only).
+7. **JPEG Ghost** (diagnostic only) — Re-compression error curve analysis. Not in ensemble — H.264 defeats the JPEG-specific dip pattern.
 
 ### Smart frame sampling (3-pass)
 
@@ -59,7 +62,9 @@ src/verifi/
 │   ├── base.py            # Abstract BaseDetector interface
 │   ├── clip_detector.py   # CLIP ViT-L/14 zero-shot (open_clip, prompt ensembling)
 │   ├── effnet_detector.py # EfficientNet-B4 via timm
-│   ├── frequency.py       # DCT frequency analysis (no ML)
+│   ├── frequency.py       # DCT frequency + cross-channel correlation (no ML)
+│   ├── noise_residual.py  # Noise residual analysis (SRM-inspired, no ML)
+│   ├── jpeg_ghost.py      # JPEG ghost re-compression analysis (no ML)
 │   └── temporal.py        # Optical flow consistency
 ├── ensemble/
 │   └── aggregator.py      # Dual-path weighted aggregation + consensus override + verdict
@@ -80,18 +85,26 @@ src/verifi/
 - Phase 1: All 4 detectors working, config system, weight download, validation script
 - Phase 2: Video ingestion, scene detection, smart frame sampling, face detection + tracking
 - Phase 3: Dual-path ensemble, GradCAM, forensic views, pipeline orchestrator, zero-shot CLIP, multi-band DCT, frame consensus override, small-face EfficientNet skip
+- Phase 4: Agentic investigation with tool-use loop, LLM explainer, decision tree prompts
+- Phase 5: Detection calibration — noise residual promoted to primary signal (inverted polarity for H.264), temporal analyzer enhanced (flow CV, SSIM, flicker), ensemble rebalanced (DCT 0.30, NR 0.25, temporal 0.25, CLIP 0.15, ChCorr 0.05), conservative thresholds (0.35/0.70), signal agreement bonus, confidence field, agent decision tree rewritten
+
+**Ensemble weights:**
+- Frame path: DCT 0.30, noise_residual 0.25, temporal 0.25, CLIP 0.15, channel_corr 0.05
+- Face path: DCT 0.30, CLIP 0.20, noise_residual 0.20, EfficientNet 0.15, temporal 0.10, channel_corr 0.05
+- Thresholds: LIKELY_AUTHENTIC < 0.35, SUSPICIOUS 0.35-0.70, LIKELY_MANIPULATED >= 0.70
+- Signal agreement bonus: +0.05 when DCT and noise_residual both > 0.55; -0.03 penalty when they disagree
 
 **Known issues:**
-- Zero-shot CLIP scores plateau at 0.5-0.7 range, so the LIKELY_MANIPULATED threshold (0.70) is rarely triggered. This is a calibration issue for Phase 7 benchmarking, not a bug. Fine-tuned CLIP weights (LN-tuned on FF++) would produce higher-confidence scores.
-- Manipulation type inference (`infer_manipulation_type`) thresholds need recalibration for zero-shot score ranges — currently returns "unknown" for most cases.
-- EfficientNet-B4 using ImageNet pretrained weights (DeepfakeBench FF++ weights not yet downloaded). Scores are noisy without proper weights.
+- CLIP is semantic/aesthetic, not forensic. Fails on photorealistic AI video. Demoted to weight 0.15.
+- Cross-channel correlation is UNRELIABLE after H.264 compression — real 720p videos score 0.73-0.97, overlapping entirely with AI. Demoted to weight 0.05 (tiebreaker only).
+- Noise residual polarity is INVERTED for H.264: real video has HIGH autocorrelation (from deblocking filters), AI has LOWER. The scoring accounts for this inversion.
+- Temporal signals are confounded by content type (static interview vs fast sports). Used as supplementary, not primary.
+- EfficientNet-B4 weights load from DeepfakeBench FF++ checkpoint but are not calibrated.
+- Separation margin on 10-video test set is tight. Wide SUSPICIOUS band (0.35-0.70) is intentional to avoid overconfident wrong answers.
 - Scene detection test uses threshold=5.0 (not default 30.0) because mp4v codec compression smooths synthetic test video color transitions.
 - Pillow requires >=11.0 for Python 3.13 compatibility.
-- Runtime is ~51s for an 8s video on M3 Air (frame selection ~12s, inference ~21s, GradCAM ~13s).
 
 **Next phases:**
-- Phase 4: LLM explainer integration (Ollama prompts, structured JSON output)
-- Phase 5: Pipeline polish (error handling, graceful degradation)
 - Phase 6: FastAPI endpoints (POST /analyze, GET /report/{id})
 - Phase 7: Benchmarking on FF++, Celeb-DF, DFDC, DF40
 

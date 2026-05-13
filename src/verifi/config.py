@@ -35,11 +35,13 @@ class DetectorConfig(BaseSettings):
 
 
 class EnsembleConfig(BaseSettings):
-    clip_weight: float = 0.45
-    effnet_weight: float = 0.30
-    frequency_weight: float = 0.15
-    temporal_weight: float = 0.10
-    suspicious_threshold: float = 0.30
+    clip_weight: float = 0.15
+    effnet_weight: float = 0.15
+    frequency_weight: float = 0.30
+    noise_residual_weight: float = 0.25
+    channel_corr_weight: float = 0.05
+    temporal_weight: float = 0.25
+    suspicious_threshold: float = 0.35
     manipulated_threshold: float = 0.70
 
 

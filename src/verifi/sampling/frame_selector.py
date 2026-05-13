@@ -151,6 +151,19 @@ def select_frames(
     filtered = [f for f in selected if f.blur_score >= min_laplacian_var]
     rejected = before_filter - len(filtered)
 
+    # ── Hard cap: prevent runaway frame counts ──
+    hard_cap = frame_budget * 2
+    if len(filtered) > hard_cap:
+        logger.warning(
+            "frame_hard_cap_triggered",
+            before_cap=len(filtered),
+            hard_cap=hard_cap,
+            budget=frame_budget,
+        )
+        # Keep the sharpest frames (highest blur_score)
+        filtered.sort(key=lambda f: f.blur_score, reverse=True)
+        filtered = filtered[:hard_cap]
+
     # Sort by frame index (chronological order)
     filtered.sort(key=lambda f: f.frame_idx)
 

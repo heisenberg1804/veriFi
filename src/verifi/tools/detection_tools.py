@@ -43,7 +43,10 @@ class CLIPDetectionTool(Tool):
         return {
             "image_key": {
                 "type": "string",
-                "description": "Key to retrieve the image from the shared context (e.g., 'frame_42', 'face_0_frame_42')",
+                "description": (
+                    "Key to retrieve the image from the shared"
+                    " context (e.g., 'frame_42', 'face_0_frame_42')"
+                ),
             },
         }
 
@@ -68,7 +71,10 @@ class CLIPDetectionTool(Tool):
             data={
                 "score": r.score,
                 "metadata": r.metadata,
-                "summary": f"CLIP score: {r.score:.3f} ({'suspicious' if r.score > 0.5 else 'likely authentic'})",
+                "summary": (
+                    f"CLIP score: {r.score:.3f} "
+                    f"({'suspicious' if r.score > 0.5 else 'likely authentic'})"
+                ),
             },
         )
 

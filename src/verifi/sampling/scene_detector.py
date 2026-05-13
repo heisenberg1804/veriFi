@@ -113,6 +113,25 @@ def detect_scenes(
 
     cap.release()
 
+    # ── Auto-raise threshold if too many boundaries ──
+    max_boundaries = 50
+    if len(boundaries) > max_boundaries:
+        raised_threshold = threshold * 1.5
+        logger.warning(
+            "scene_threshold_too_sensitive",
+            boundaries=len(boundaries),
+            max_boundaries=max_boundaries,
+            old_threshold=threshold,
+            new_threshold=raised_threshold,
+        )
+        # Re-filter boundaries with the raised threshold
+        boundaries = [b for b in boundaries if b.diff_score > raised_threshold]
+        logger.info(
+            "scene_boundaries_refiltered",
+            boundaries_after=len(boundaries),
+            threshold=raised_threshold,
+        )
+
     # ── Build scenes from boundaries ──
     raw_scenes = _build_scenes(boundaries, total, fps)
 

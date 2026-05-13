@@ -102,8 +102,13 @@ class GradCAMTool(Tool):
                 "frame_idx": frame_idx,
                 "hot_region_pct": round(hot_pixels, 1),
                 "summary": (
-                    f"GradCAM ({model_name}): {hot_pixels:.1f}% of image is 'hot'. "
-                    f"{'Diffuse attention = full-frame anomaly' if hot_pixels > 30 else 'Focused attention = localized anomaly'}"
+                    f"GradCAM ({model_name}): "
+                    f"{hot_pixels:.1f}% of image is 'hot'. "
+                    + (
+                        "Diffuse attention = full-frame anomaly"
+                        if hot_pixels > 30
+                        else "Focused attention = localized anomaly"
+                    )
                 ),
             },
         )
@@ -282,7 +287,8 @@ class QuickScanTool(Tool):
                         f"dominant: {analysis.dominant_path} path). "
                         f"{face_summary}. "
                         f"Frame path: {analysis.frame_path_score:.3f} "
-                        f"({len(analysis.flagged_frame_indices)}/{len(analysis.frame_analyses)} flagged). "
+                        f"({len(analysis.flagged_frame_indices)}"
+                        f"/{len(analysis.frame_analyses)} flagged). "
                         f"DCT: {stats.get('freq_score', 0):.3f}. "
                         f"CLIP frame mean: {stats.get('frame_clip_mean', 0):.3f}."
                     ),

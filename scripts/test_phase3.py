@@ -49,43 +49,55 @@ def main(video_path: str):
     analysis = report.analysis
     timings = report.timings
 
-    print(f"\n── Results ──")
+    print("\n── Results ──")
     print(f"  Video:            {report.video_metadata.get('filename', '?')}")
     print(f"  Duration:         {report.video_metadata.get('duration_sec', 0):.1f}s")
     print(f"  Resolution:       {report.video_metadata.get('resolution', '?')}")
 
-    print(f"\n  ┌─ Verdict ─────────────────────────────")
+    print("\n  ┌─ Verdict ─────────────────────────────")
     print(f"  │ Score:           {analysis.video_score:.3f}")
+    print(f"  │ Confidence:      {analysis.confidence:.3f}")
     print(f"  │ Verdict:         {analysis.verdict.value}")
     print(f"  │ Manipulation:    {analysis.manipulation_type.value}")
     print(f"  │ Dominant path:   {analysis.dominant_path}")
-    print(f"  └────────────────────────────────────────")
+    print("  └────────────────────────────────────────")
 
-    print(f"\n  ┌─ Path A: Face-level ─────────────────")
+    print("\n  ┌─ Path A: Face-level ─────────────────")
     print(f"  │ Active:          {analysis.face_path_active}")
     print(f"  │ Score:           {analysis.face_path_score:.3f}")
     print(f"  │ Face analyses:   {len(analysis.face_analyses)}")
     print(f"  │ Flagged:         {len(analysis.flagged_face_indices)}")
-    print(f"  └────────────────────────────────────────")
+    print("  └────────────────────────────────────────")
 
-    print(f"\n  ┌─ Path B: Frame-level ────────────────")
+    print("\n  ┌─ Path B: Frame-level ────────────────")
     print(f"  │ Active:          {analysis.frame_path_active}")
     print(f"  │ Score:           {analysis.frame_path_score:.3f}")
     print(f"  │ Frame analyses:  {len(analysis.frame_analyses)}")
     print(f"  │ Flagged:         {len(analysis.flagged_frame_indices)}")
-    print(f"  └────────────────────────────────────────")
+    print("  └────────────────────────────────────────")
 
-    print(f"\n  ┌─ Signal Statistics ───────────────────")
+    print("\n  ┌─ Signal Statistics ───────────────────")
     stats = report.signal_stats
     if analysis.face_path_active:
-        print(f"  │ Face CLIP:       mean={stats.get('clip_mean', 0):.3f}, max={stats.get('clip_max', 0):.3f}")
-        print(f"  │ Face EfficientNet: mean={stats.get('effnet_mean', 0):.3f}, max={stats.get('effnet_max', 0):.3f}")
-    print(f"  │ Frame CLIP:      mean={stats.get('frame_clip_mean', 0):.3f}, max={stats.get('frame_clip_max', 0):.3f}")
-    print(f"  │ DCT Frequency:   score={stats.get('freq_score', 0):.3f}, HF suppression={stats.get('hf_suppression', 0):.1f}%")
+        clip_m = stats.get('clip_mean', 0)
+        clip_x = stats.get('clip_max', 0)
+        print(f"  │ Face CLIP:       mean={clip_m:.3f}, max={clip_x:.3f}")
+        eff_m = stats.get('effnet_mean', 0)
+        eff_x = stats.get('effnet_max', 0)
+        print(f"  │ Face EfficientNet: mean={eff_m:.3f}, max={eff_x:.3f}")
+    fc_m = stats.get('frame_clip_mean', 0)
+    fc_x = stats.get('frame_clip_max', 0)
+    print(f"  │ Frame CLIP:      mean={fc_m:.3f}, max={fc_x:.3f}")
+    freq = stats.get('freq_score', 0)
+    hf_s = stats.get('hf_suppression', 0)
+    print(f"  │ DCT Frequency:   score={freq:.3f}, HF={hf_s:.1f}%")
+    nr_m = stats.get('noise_residual_mean', 0)
+    nr_x = stats.get('noise_residual_max', 0)
+    print(f"  │ Noise Residual:  mean={nr_m:.3f}, max={nr_x:.3f}")
     print(f"  │ Temporal:        {stats.get('temporal_summary', 'N/A')}")
-    print(f"  └────────────────────────────────────────")
+    print("  └────────────────────────────────────────")
 
-    print(f"\n  ┌─ Timings ─────────────────────────────")
+    print("\n  ┌─ Timings ─────────────────────────────")
     print(f"  │ Validation:      {timings.validation:.2f}s")
     print(f"  │ Scene detection:  {timings.scene_detection:.2f}s")
     print(f"  │ Frame selection:  {timings.frame_selection:.2f}s")
@@ -96,11 +108,11 @@ def main(video_path: str):
     print(f"  │ Ensemble:         {timings.ensemble:.2f}s")
     print(f"  │ GradCAM:          {timings.gradcam:.2f}s")
     print(f"  │ Forensic views:   {timings.forensic_views:.2f}s")
-    print(f"  │ ────────────────────────────────────")
+    print("  │ ────────────────────────────────────")
     print(f"  │ TOTAL:            {timings.total:.2f}s")
-    print(f"  └────────────────────────────────────────")
+    print("  └────────────────────────────────────────")
 
-    print(f"\n  ┌─ Output Files ────────────────────────")
+    print("\n  ┌─ Output Files ────────────────────────")
     print(f"  │ Output dir:      {report.output_dir}")
     print(f"  │ Heatmaps:        {len(report.heatmap_paths)}")
     for p in report.heatmap_paths[:5]:
@@ -110,7 +122,7 @@ def main(video_path: str):
         print(f"  │   {Path(p).name}")
     if report.timeline_path:
         print(f"  │ Timeline:        {Path(report.timeline_path).name}")
-    print(f"  └────────────────────────────────────────")
+    print("  └────────────────────────────────────────")
 
     # ── Save JSON report ──
     report_path = Path(report.output_dir) / "report.json"
@@ -120,7 +132,7 @@ def main(video_path: str):
     print(f"\n  JSON report saved: {report_path}")
 
     # ── Per-frame score dump ──
-    print(f"\n── Frame-level scores (top 10 by score) ──")
+    print("\n── Frame-level scores (top 10 by score) ──")
     sorted_frames = sorted(
         analysis.frame_analyses,
         key=lambda a: a.ensemble_score,
@@ -139,7 +151,10 @@ def main(video_path: str):
     if analysis.verdict.value == "LIKELY_MANIPULATED":
         print(f"  RESULT: Video is likely AI-generated/manipulated ({analysis.video_score:.3f})")
     elif analysis.verdict.value == "SUSPICIOUS":
-        print(f"  RESULT: Video is suspicious — manual review recommended ({analysis.video_score:.3f})")
+        print(
+            f"  RESULT: Video is suspicious — manual review"
+            f" recommended ({analysis.video_score:.3f})"
+        )
     else:
         print(f"  RESULT: Video appears authentic ({analysis.video_score:.3f})")
 
