@@ -49,6 +49,8 @@ class ExplainerConfig(BaseSettings):
     model: str = "claude-sonnet-4-20250514"
     max_heatmap_frames: int = 5
     max_tokens: int = 1500
+    physics_backend: str = "ollama"
+    physics_model: str = "llava:7b"
 
 
 class AppConfig(BaseSettings):

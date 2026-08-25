@@ -14,6 +14,7 @@ import numpy as np
 from verifi.detectors.clip_detector import CLIPDeepfakeDetector
 from verifi.detectors.effnet_detector import EfficientNetDetector
 from verifi.detectors.frequency import FrequencyAnalyzer
+from verifi.detectors.physics_reasoner import PhysicsReasoner
 from verifi.detectors.temporal import TemporalAnalyzer
 from verifi.tools.base import Tool, ToolResult
 
@@ -260,3 +261,83 @@ class TemporalConsistencyTool(Tool):
                 ),
             },
         )
+
+
+class PhysicsReasoningTool(Tool):
+    """Analyze video frames for physics violations using a vision AI model."""
+
+    def __init__(self, reasoner: PhysicsReasoner):
+        self._reasoner = reasoner
+
+    @property
+    def name(self) -> str:
+        return "physics_reasoning"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Analyze video frames for physics violations using a vision AI model. "
+            "Checks shadows, reflections, perspective geometry, anatomy, and textures "
+            "for physical impossibilities that AI generators produce. "
+            "This is the most reliable signal for detecting photorealistic AI video "
+            "that fools statistical detectors. "
+            "Requires frame images to be available in context (call sample_more_frames first). "
+            "Cost: uses API call, use only when statistical signals are inconclusive."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "frame_keys": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Keys of frames to analyze (e.g., ['frame_0', 'frame_12'])",
+            },
+        }
+
+    def execute(
+        self,
+        frames: list[np.ndarray] | None = None,
+        frame_indices: list[int] | None = None,
+        timestamps: list[float] | None = None,
+        tier1_context: dict | None = None,
+        **kwargs,
+    ) -> ToolResult:
+        if frames is None or not frames:
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                error="No frames provided for physics analysis",
+            )
+
+        if frame_indices is None:
+            frame_indices = list(range(len(frames)))
+        if timestamps is None:
+            timestamps = [0.0] * len(frames)
+
+        try:
+            result = self._reasoner.analyze(
+                frames, frame_indices, timestamps, tier1_context
+            )
+            return ToolResult(
+                tool_name=self.name,
+                success=True,
+                data={
+                    "score": result.aggregate_score,
+                    "confidence": result.confidence,
+                    "verdict": result.verdict_suggestion,
+                    "num_frames": result.num_frames_analyzed,
+                    "evidence": result.evidence_summary,
+                    "summary": (
+                        f"Physics score: {result.aggregate_score:.3f} "
+                        f"(confidence: {result.confidence:.2f}, "
+                        f"verdict: {result.verdict_suggestion})"
+                    ),
+                },
+            )
+        except Exception as e:
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                error=f"Physics analysis failed: {e}",
+            )

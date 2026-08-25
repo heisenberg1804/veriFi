@@ -31,3 +31,6 @@ htmlcov/
 
 # Ruff
 .ruff_cache/
+CCresponse/
+data/datasets/
+data/reports/

@@ -220,12 +220,18 @@ def extract_frames(video_path: str, n: int = 10) -> list[np.ndarray]:
 
 
 def get_video_label(video_path: Path) -> str:
-    """Heuristic label: 'real' or 'ai' based on filename conventions."""
+    """Label based on known ground truth for the sample video set."""
     name = video_path.stem.lower()
-    real_indicators = ["real", "authentic", "genuine", "sample"]
     ai_indicators = [
         "capybara", "sora", "veo", "runway", "midjourney",
         "generated", "synthetic", "fake", "deepfake",
+        "wasifai", "socialsight", "cameraman knew",
+        "mansur", "victoria repa",
+    ]
+    real_indicators = [
+        "real", "authentic", "genuine", "sample",
+        "messi", "nostalgia", "ben 10", "iphone",
+        "florentino", "pérez",
     ]
     for ind in ai_indicators:
         if ind in name:
@@ -233,7 +239,6 @@ def get_video_label(video_path: Path) -> str:
     for ind in real_indicators:
         if ind in name:
             return "real"
-    # Default: unknown — skip from separation calc
     return "unknown"
 
 
