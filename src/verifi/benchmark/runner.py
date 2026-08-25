@@ -18,7 +18,7 @@ from verifi.benchmark.datasets.celebdf import CelebDFAdapter
 from verifi.benchmark.datasets.df40 import DF40Adapter
 from verifi.benchmark.datasets.dfdc import DFDCAdapter
 from verifi.benchmark.datasets.faceforensics import FaceForensicsAdapter
-from verifi.benchmark.results import ResultsWriter, VideoResult
+from verifi.benchmark.results import FrameSignals, ResultsWriter, VideoResult
 from verifi.pipeline.orchestrator import VeriFiPipeline
 
 logger = structlog.get_logger()
@@ -77,6 +77,25 @@ def _extract_signal_scores(analysis) -> dict[str, float]:
             signal_means.setdefault(key, []).append(sig.score)
 
     return {k: float(np.mean(v)) for k, v in signal_means.items()}
+
+
+def _extract_per_frame_signals(analysis) -> tuple[list[FrameSignals], list[FrameSignals]]:
+    """Extract raw per-frame and per-face signal dicts for offline re-scoring."""
+    frame_sigs = [
+        FrameSignals(
+            frame_idx=fa.frame_idx,
+            signals={s.name: s.score for s in fa.signals},
+        )
+        for fa in analysis.frame_analyses
+    ]
+    face_sigs = [
+        FrameSignals(
+            frame_idx=fa.frame_idx,
+            signals={s.name: s.score for s in fa.signals},
+        )
+        for fa in analysis.face_analyses
+    ]
+    return frame_sigs, face_sigs
 
 
 class BenchmarkRunner:
@@ -186,6 +205,7 @@ class BenchmarkRunner:
             )
             analysis = report.analysis
             signal_scores = _extract_signal_scores(analysis)
+            frame_sigs, face_sigs = _extract_per_frame_signals(analysis)
 
             return VideoResult(
                 video_path=str(sample.path),
@@ -200,6 +220,8 @@ class BenchmarkRunner:
                 dominant_path=analysis.dominant_path,
                 manipulation_type=analysis.manipulation_type.value,
                 signal_scores=signal_scores,
+                frame_signals=frame_sigs,
+                face_signals=face_sigs,
                 processing_time_sec=time.perf_counter() - t0,
             )
 

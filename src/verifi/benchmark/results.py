@@ -9,6 +9,21 @@ from pathlib import Path
 
 
 @dataclass
+class FrameSignals:
+    """Raw per-signal scores for one frame or face crop."""
+
+    frame_idx: int
+    signals: dict[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {"frame_idx": self.frame_idx, "signals": self.signals}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> FrameSignals:
+        return cls(frame_idx=d["frame_idx"], signals=d.get("signals", {}))
+
+
+@dataclass
 class VideoResult:
     """Result of running the pipeline on one video."""
 
@@ -24,6 +39,8 @@ class VideoResult:
     dominant_path: str
     manipulation_type: str
     signal_scores: dict[str, float] = field(default_factory=dict)
+    frame_signals: list[FrameSignals] = field(default_factory=list)
+    face_signals: list[FrameSignals] = field(default_factory=list)
     processing_time_sec: float = 0.0
     error: str | None = None
     timestamp: str = ""
@@ -33,10 +50,17 @@ class VideoResult:
             self.timestamp = datetime.now(UTC).isoformat()
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = {k: v for k, v in asdict(self).items()
+             if k not in ("frame_signals", "face_signals")}
+        d["frame_signals"] = [fs.to_dict() for fs in self.frame_signals]
+        d["face_signals"] = [fs.to_dict() for fs in self.face_signals]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> VideoResult:
+        d = dict(d)
+        d["frame_signals"] = [FrameSignals.from_dict(fs) for fs in d.get("frame_signals", [])]
+        d["face_signals"] = [FrameSignals.from_dict(fs) for fs in d.get("face_signals", [])]
         return cls(**d)
 
 
