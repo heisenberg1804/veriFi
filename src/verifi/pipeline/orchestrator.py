@@ -54,7 +54,6 @@ from verifi.ingestion.validator import validate_video
 from verifi.preprocessing.face_detector import FaceDetectionPipeline
 from verifi.sampling.frame_selector import (
     SelectedFrame,
-    # SelectionResult,
     _pass1_sequential_decode,
     _pass2_load_pixels,
     _select_indices,
