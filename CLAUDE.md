@@ -76,7 +76,11 @@ src/verifi/
 │   └── llm_explainer.py   # Ollama (local) / Claude API (production)
 ├── pipeline/
 │   └── orchestrator.py    # End-to-end VeriFiPipeline.analyze()
-└── api/                   # FastAPI server (Phase 6, not yet built)
+└── api/
+    ├── app.py             # FastAPI app, lifespan, pipeline singleton
+    ├── schemas.py         # Pydantic request/response models
+    └── routes/
+        └── analysis.py    # POST /analyze, /analyze/upload, GET /report/{id}, /reports
 ```
 
 ## Current state
@@ -87,6 +91,8 @@ src/verifi/
 - Phase 3: Dual-path ensemble, GradCAM, forensic views, pipeline orchestrator, zero-shot CLIP, multi-band DCT, frame consensus override, small-face EfficientNet skip
 - Phase 4: Agentic investigation with tool-use loop, LLM explainer, decision tree prompts
 - Phase 5: Detection calibration — noise residual promoted to primary signal (inverted polarity for H.264), temporal analyzer enhanced (flow CV, SSIM, flicker), ensemble rebalanced (DCT 0.30, NR 0.25, temporal 0.25, CLIP 0.15, ChCorr 0.05), conservative thresholds (0.35/0.70), signal agreement bonus, confidence field, agent decision tree rewritten
+- Phase 6: FastAPI REST API — POST /api/v1/analyze (path or URL), POST /api/v1/analyze/upload (file upload), GET /api/v1/report/{id} (full report), GET /api/v1/reports (list), GET /health. Lifespan-managed pipeline singleton, CORS middleware, Pydantic schemas, report persistence as JSON.
+- Phase 7: Benchmarking infrastructure — dataset adapters (FF++, Celeb-DF, DFDC, DF40), BenchmarkRunner with resume, MetricsComputer (ROC/AUC, EER), PlotGenerator, CLI scripts
 
 **Ensemble weights:**
 - Frame path: DCT 0.30, noise_residual 0.25, temporal 0.25, CLIP 0.15, channel_corr 0.05
@@ -105,8 +111,7 @@ src/verifi/
 - Pillow requires >=11.0 for Python 3.13 compatibility.
 
 **Next phases:**
-- Phase 6: FastAPI endpoints (POST /analyze, GET /report/{id})
-- Phase 7: Benchmarking on FF++, Celeb-DF, DFDC, DF40
+- Phase 8: Run benchmarks on real datasets, fine-tune thresholds/weights based on AUC/EER
 
 ## Tech stack
 

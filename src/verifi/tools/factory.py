@@ -32,6 +32,7 @@ from verifi.tools.detection_tools import (
     CLIPDetectionTool,
     DCTFrequencyTool,
     EfficientNetDetectionTool,
+    PhysicsReasoningTool,
     TemporalConsistencyTool,
 )
 from verifi.tools.sampling_tools import (
@@ -70,6 +71,7 @@ def create_tool_registry(
     registry.register(EfficientNetDetectionTool(pipeline._effnet))
     registry.register(DCTFrequencyTool(FrequencyAnalyzer()))
     registry.register(TemporalConsistencyTool())
+    registry.register(PhysicsReasoningTool(pipeline._physics))
 
     # ── Sampling tools ──
     registry.register(ZoomRegionTool())
@@ -104,6 +106,7 @@ def get_langchain_tools(registry: ToolRegistry) -> list:
         "run_clip_detection",
         "run_dct_analysis",
         "run_temporal_analysis",
+        "physics_reasoning",
         "zoom_region",
         "sample_more_frames",
         "detect_faces",

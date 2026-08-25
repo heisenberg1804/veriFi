@@ -1,0 +1,440 @@
+# Claude Code Prompt — Physics Reasoning (Tier 2)
+
+Paste this entire block into Claude Code. It covers the full implementation.
+
+---
+
+## Context
+
+We're adding physics-based reasoning as Tier 2 of our detection pipeline. The current statistical signals (DCT, noise residual, CLIP, temporal) all land in a SUSPICIOUS band for both real and AI videos — they can't reliably discriminate. Physics reasoning uses a multimodal (vision) LLM to examine frames for physical impossibilities that AI generators produce.
+
+The development approach is cost-minimized:
+- **Development:** Use Ollama with a local vision model (minicpm-v or llava:7b) — completely free
+- **Production:** Use Claude API (claude-sonnet-4-20250514 with vision) — ~$0.15/video
+- **Testing:** Develop prompts locally, only call Claude API for final validation
+
+## Step 1: Local vision model (already pulled)
+
+We're using `llava:7b` which is already installed and verified working on the M3.
+It correctly identifies scene content (red carpet, photographers, animal character)
+from base64-encoded images via the Ollama /api/chat endpoint.
+
+Verify it's available:
+```bash
+ollama list | grep llava
+```
+
+## Step 2: Build the PhysicsReasoner
+
+Create `src/verifi/detectors/physics_reasoner.py`:
+
+```python
+"""
+Physics-based reasoning for AI video detection.
+Uses a multimodal (vision) LLM to examine frames for physical violations.
+Supports Ollama (free, local) and Claude API (production).
+"""
+```
+
+### Class structure:
+
+```python
+@dataclass
+class PhysicsFrameResult:
+    """Physics analysis for one frame."""
+    frame_idx: int
+    timestamp_sec: float
+    shadow_score: float        # 0 = consistent, 1 = violation
+    reflection_score: float
+    perspective_score: float
+    anatomy_score: float       # only if humans present
+    texture_score: float
+    overall_score: float       # 0 = physically plausible, 1 = violations detected
+    evidence: list[str]        # specific findings, e.g., "Shadow direction inconsistent with light at top-right"
+    reasoning: str             # full LLM reasoning text
+
+
+@dataclass
+class PhysicsAnalysisResult:
+    """Complete physics analysis for a video."""
+    per_frame: list[PhysicsFrameResult]
+    aggregate_score: float     # mean of per-frame overall_scores
+    confidence: float          # based on score consistency across frames
+    evidence_summary: list[str]
+    verdict_suggestion: str    # "likely_authentic" | "suspicious" | "likely_manipulated"
+    num_frames_analyzed: int
+    backend_used: str          # "ollama" or "claude"
+
+
+class PhysicsReasoner:
+    """
+    Analyzes video frames for physics violations using vision LLM.
+    """
+    
+    def __init__(
+        self,
+        backend: str = "ollama",          # "ollama" or "claude"
+        ollama_model: str = "llava:7b",   # local vision model
+        claude_model: str = "claude-sonnet-4-20250514",
+        ollama_url: str = "http://localhost:11434",
+        max_frames: int = 6,
+    ):
+        ...
+    
+    def analyze(
+        self,
+        frames: list[np.ndarray],         # BGR frames
+        frame_indices: list[int],          # frame indices for tracking
+        timestamps: list[float],           # timestamps for tracking
+        tier1_context: dict | None = None, # Tier 1 results for context
+    ) -> PhysicsAnalysisResult:
+        """Run physics analysis on selected frames."""
+        ...
+    
+    def _select_frames(
+        self,
+        all_frames: list[tuple[np.ndarray, int, float]],  # (image, idx, timestamp)
+        tier1_context: dict | None,
+        max_frames: int = 6,
+    ) -> list[tuple[np.ndarray, int, float]]:
+        """
+        Select the most informative frames for analysis.
+        Strategy:
+        - If tier1_context available: pick frames with highest ensemble scores
+        - Ensure temporal diversity: at least 1 second apart
+        - Prefer frames with faces (if any detected in Tier 1)
+        - Include at least 1 frame from start, middle, and end
+        """
+        ...
+    
+    def _analyze_ollama(self, frames, indices, timestamps, context) -> PhysicsAnalysisResult:
+        """Call local Ollama vision model."""
+        ...
+    
+    def _analyze_claude(self, frames, indices, timestamps, context) -> PhysicsAnalysisResult:
+        """Call Claude API with vision."""
+        ...
+    
+    def _build_physics_prompt(self, tier1_context: dict | None) -> str:
+        """Build the physics analysis prompt."""
+        ...
+    
+    def _parse_response(self, raw: str, num_frames: int) -> list[PhysicsFrameResult]:
+        """Parse LLM response into structured frame results."""
+        ...
+```
+
+### The physics analysis prompt:
+
+```python
+PHYSICS_ANALYSIS_PROMPT = """\
+You are a forensic video analyst specializing in physics-based authentication.
+You will examine frames from a video to determine if they were captured by a 
+real camera or generated by AI.
+
+AI video generators (Sora, Veo, Runway, Kling) produce visually convincing 
+output but frequently violate physical laws in subtle ways. Your job is to 
+identify these violations.
+
+For EACH frame, analyze these physics properties:
+
+1. SHADOWS (score 0.0-1.0):
+   - Identify shadow-casting objects and their shadows
+   - Check if shadow directions are mutually consistent (single light source 
+     should produce parallel shadows)
+   - Check shadow softness matches light source distance
+   - 0.0 = shadows are physically correct, 1.0 = clear shadow violations
+
+2. REFLECTIONS (score 0.0-1.0):
+   - Find reflective surfaces (glass, water, metal, eyes)
+   - Check if reflections are geometrically consistent with the scene
+   - Check if reflected content matches what should be visible
+   - 0.0 = reflections correct, 1.0 = clear reflection violations
+
+3. PERSPECTIVE (score 0.0-1.0):
+   - Find parallel lines (building edges, road markings, tiles, rails)
+   - Check if they converge to a consistent vanishing point
+   - Check relative sizes of objects at different depths
+   - 0.0 = perspective correct, 1.0 = perspective violations
+
+4. ANATOMY (score 0.0-1.0, only if humans/animals visible):
+   - Count fingers on visible hands
+   - Check ear symmetry and structure
+   - Check teeth regularity and plausibility
+   - Check hair-scalp boundary naturalness
+   - Check eye reflections match between left and right
+   - 0.0 = anatomy normal, 1.0 = anatomical anomalies
+
+5. TEXTURE (score 0.0-1.0):
+   - Check material plausibility (fabric drape, water surface, skin pores)
+   - Look for repeating/tiling patterns that suggest generation artifacts
+   - Check if fine details (text, logos, patterns) are coherent
+   - 0.0 = textures plausible, 1.0 = texture anomalies
+
+6. OVERALL ASSESSMENT (score 0.0-1.0):
+   - Considering all the above, how likely is this frame AI-generated?
+   - 0.0 = almost certainly real camera footage
+   - 0.5 = uncertain, could be either
+   - 1.0 = almost certainly AI-generated
+
+IMPORTANT RULES:
+- If the content is traditional animation or cartoon, say so and score 
+  anatomy/texture as N/A. Cartoon physics violations are not evidence of AI.
+- If the video is heavily compressed or low resolution, note this as a 
+  limitation that reduces your confidence.
+- Ignore any text visible in the frames — analyze only visual physics.
+- Be specific in your evidence: "shadow of lamp post points left while 
+  shadow of person points right" not just "shadows look wrong."
+
+Respond ONLY with valid JSON in this format:
+{
+  "frames": [
+    {
+      "frame_index": 0,
+      "shadow_score": 0.0,
+      "reflection_score": 0.0,
+      "perspective_score": 0.0,
+      "anatomy_score": 0.0,
+      "texture_score": 0.0,
+      "overall_score": 0.0,
+      "evidence": ["specific finding 1", "specific finding 2"],
+      "reasoning": "Brief explanation of overall assessment"
+    }
+  ],
+  "aggregate_assessment": "Brief overall video assessment",
+  "verdict_suggestion": "likely_authentic | suspicious | likely_manipulated"
+}"""
+```
+
+### Ollama vision call format:
+
+```python
+async def _analyze_ollama(self, frames, indices, timestamps, context):
+    """
+    Ollama's vision API accepts images in the /api/chat endpoint.
+    Images are sent as base64 strings in the 'images' field.
+    """
+    import base64
+    import cv2
+    
+    # Encode frames as base64 JPEG (smaller than PNG)
+    images_b64 = []
+    for frame in frames:
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        images_b64.append(base64.b64encode(buffer).decode('utf-8'))
+    
+    # Build context string from Tier 1
+    context_str = ""
+    if context:
+        context_str = f"\n\nTier 1 statistical analysis found: {json.dumps(context, indent=2)}"
+    
+    prompt = PHYSICS_ANALYSIS_PROMPT + context_str + \
+        f"\n\nAnalyze the {len(frames)} frames provided. " + \
+        "Frame timestamps: " + ", ".join(f"{t:.1f}s" for t in timestamps)
+    
+    # Ollama /api/chat with images
+    payload = {
+        "model": self.ollama_model,
+        "messages": [{
+            "role": "user",
+            "content": prompt,
+            "images": images_b64,  # Ollama accepts base64 images here
+        }],
+        "stream": False,
+        "options": {"temperature": 0.2, "num_predict": 3000},
+    }
+    
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        resp = await client.post(f"{self.ollama_url}/api/chat", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        raw = data["message"]["content"]
+    
+    return self._parse_response(raw, len(frames))
+```
+
+### Claude API vision call format:
+
+```python
+async def _analyze_claude(self, frames, indices, timestamps, context):
+    """
+    Claude accepts images as base64 in the messages content array.
+    """
+    import anthropic
+    import base64
+    import cv2
+    
+    client = anthropic.Anthropic()
+    
+    content = []
+    # Add each frame as an image
+    for i, frame in enumerate(frames):
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        b64 = base64.standard_b64encode(buffer).decode('utf-8')
+        content.append({"type": "text", "text": f"Frame {i+1} (timestamp {timestamps[i]:.1f}s):"})
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+        })
+    
+    # Add the analysis prompt
+    context_str = ""
+    if context:
+        context_str = f"\n\nTier 1 statistical analysis found: {json.dumps(context, indent=2)}"
+    
+    content.append({
+        "type": "text",
+        "text": PHYSICS_ANALYSIS_PROMPT + context_str,
+    })
+    
+    response = client.messages.create(
+        model=self.claude_model,
+        max_tokens=3000,
+        messages=[{"role": "user", "content": content}],
+    )
+    
+    raw = response.content[0].text
+    return self._parse_response(raw, len(frames))
+```
+
+## Step 3: Wire into pipeline
+
+Modify `src/verifi/pipeline/orchestrator.py`:
+
+In the `analyze()` method, after the ensemble aggregation step (Stage 8), add:
+
+```python
+# ── Stage 9: Physics reasoning (Tier 2) ──
+# Only run if verdict is not LIKELY_AUTHENTIC
+if analysis.verdict != Verdict.LIKELY_AUTHENTIC:
+    t0 = time.perf_counter()
+    physics_result = self._run_physics_reasoning(frames, analysis)
+    timings.physics_reasoning = time.perf_counter() - t0
+    
+    if physics_result:
+        # Combine physics score with ensemble score
+        combined = 0.60 * analysis.video_score + 0.40 * physics_result.aggregate_score
+        
+        # Physics can upgrade or downgrade the verdict
+        if combined >= self.config.ensemble.manipulated_threshold:
+            analysis.verdict = Verdict.LIKELY_MANIPULATED
+        elif combined < self.config.ensemble.suspicious_threshold:
+            analysis.verdict = Verdict.LIKELY_AUTHENTIC
+        
+        analysis.video_score = combined
+        analysis.physics_result = physics_result
+```
+
+Add the PhysicsReasoner to the pipeline:
+
+```python
+def __init__(self, config):
+    ...
+    self._physics = PhysicsReasoner(
+        backend=config.explainer.backend,  # "ollama" or "claude"
+        ollama_model="llava:7b",
+        max_frames=6,
+    )
+```
+
+Add `physics_reasoning` as a field in StageTimings.
+
+## Step 4: Add as agent tool
+
+In `src/verifi/tools/detection_tools.py`, add:
+
+```python
+class PhysicsReasoningTool(Tool):
+    def __init__(self, reasoner: PhysicsReasoner):
+        self._reasoner = reasoner
+    
+    @property
+    def name(self) -> str:
+        return "physics_reasoning"
+    
+    @property
+    def description(self) -> str:
+        return (
+            "Analyze video frames for physics violations using a vision AI model. "
+            "Checks shadows, reflections, perspective geometry, anatomy, and textures "
+            "for physical impossibilities that AI generators produce. "
+            "This is the most reliable signal for detecting photorealistic AI video "
+            "that fools statistical detectors. "
+            "Requires frame images to be available in context (call sample_more_frames first). "
+            "Cost: uses API call, use only when statistical signals are inconclusive."
+        )
+    
+    @property
+    def parameters(self) -> dict:
+        return {
+            "frame_keys": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Keys of frames to analyze (e.g., ['frame_0', 'frame_12'])",
+            },
+        }
+    
+    def execute(self, frames=None, frame_indices=None, timestamps=None, 
+                tier1_context=None, **kwargs) -> ToolResult:
+        ...
+```
+
+Register in `src/verifi/tools/factory.py`:
+
+```python
+from verifi.tools.detection_tools import PhysicsReasoningTool
+
+# In create_tool_registry():
+registry.register(PhysicsReasoningTool(pipeline._physics))
+```
+
+## Step 5: Create calibration script
+
+Create `scripts/calibrate_physics.py` that:
+1. Runs PhysicsReasoner (Ollama backend) on all 10 test videos
+2. For each video, prints per-frame physics scores
+3. Computes aggregate score per video
+4. Shows a comparison table: video name | ground truth | physics score | verdict
+5. Computes separation gap between real and AI videos
+
+## Step 6: Tests
+
+Create `tests/test_detectors/test_physics_reasoner.py`:
+- Test PhysicsAnalysisResult dataclass
+- Test PhysicsFrameResult dataclass  
+- Test _parse_response with sample JSON (mock, no API call)
+- Test _select_frames picks diverse timestamps
+- Test _build_physics_prompt includes all 6 categories
+- Test fallback when Ollama is not running (graceful error)
+
+## Step 7: Run and evaluate
+
+```bash
+# Vision model already available (llava:7b)
+ollama list | grep llava
+
+# Run tests
+make test
+
+# Run physics calibration on all test videos
+python scripts/calibrate_physics.py
+
+# Run full pipeline integration test
+python scripts/test_phase4.py data/sample_videos/Capybara_Walks_Oscars_Red_Carpet.mp4
+```
+
+## Important notes for Claude Code:
+
+1. **Do NOT import physics_reasoner from within detectors/base.py or any detector** — it's a standalone module that imports httpx and anthropic, not torch.
+
+2. **The PhysicsReasoner must be ASYNC** — both Ollama and Claude calls are async HTTP requests. The orchestrator's analyze() method will need to handle this (either make analyze() async, or use asyncio.run() for the physics call within the sync method).
+
+3. **Frame encoding for Ollama:** Use JPEG at quality 85, not PNG. JPEG is ~5x smaller, reducing the payload and response time for local models. Resize frames to max 720px on the longest side before encoding — vision models don't benefit from higher resolution and it wastes bandwidth.
+
+4. **Frame encoding for Claude:** Same JPEG approach. Claude's vision accepts up to 20 images per message. We send 6.
+
+5. **Config:** Add `physics_backend` and `physics_model` to ExplainerConfig in config.py. Default to "ollama" and "llava:7b". Override with env vars VERIFI_EXPLAINER__PHYSICS_BACKEND and VERIFI_EXPLAINER__PHYSICS_MODEL.
+
+6. **Timeout:** Local vision models are slow (~30-60s per multi-frame analysis). Set timeout to 300s for Ollama, 60s for Claude API.
+
+7. **Cost logging:** Log the estimated API cost whenever Claude backend is used. Log a warning if more than 10 Claude API calls happen in a single session.
