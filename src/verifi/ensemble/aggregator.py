@@ -319,55 +319,108 @@ def infer_manipulation_type(
     return ManipulationType.UNKNOWN
 
 
-def aggregate(
-    face_analyses: list[FaceFrameAnalysis],
-    frame_analyses: list[FullFrameAnalysis],
-    weights: EnsembleWeights | None = None,
-) -> VideoAnalysis:
+@dataclass
+class ScoringResult:
+    """Pure output of score_from_signals — no mutable state."""
+    face_path_score: float
+    frame_path_score: float
+    video_score: float
+    confidence: float
+    verdict: Verdict
+    dominant_path: str
+    face_per_item_scores: list[float]
+    frame_per_item_scores: list[float]
+
+
+def score_from_signals(
+    frame_signals: list[list[dict[str, float]]],
+    face_signals: list[list[dict[str, float]]],
+    weights: EnsembleWeights,
+) -> ScoringResult:
     """
-    Main aggregation function: combine both paths into a single verdict.
+    Pure function: compute video score from raw per-frame/per-face signal dicts.
 
     Args:
-        face_analyses: Per-face-per-frame results from Path A.
-        frame_analyses: Per-frame results from Path B.
-        weights: Ensemble configuration. Uses defaults if None.
+        frame_signals: list of per-frame signal dicts, e.g.
+            [{"dct": 0.41, "clip": 0.32, "noise_residual": 0.63, ...}, ...]
+        face_signals: list of per-face signal dicts (same shape)
+        weights: ensemble configuration
 
     Returns:
-        VideoAnalysis with combined verdict and flagged items.
+        ScoringResult with all scores and verdict.
     """
-    if weights is None:
-        weights = EnsembleWeights()
+    face_weight_map = {
+        "clip": weights.face_clip, "effnet": weights.face_effnet,
+        "dct": weights.face_dct, "noise_residual": weights.face_noise_residual,
+        "channel_corr": weights.face_channel_corr, "temporal": weights.face_temporal,
+    }
+    frame_weight_map = {
+        "clip": weights.frame_clip, "dct": weights.frame_dct,
+        "noise_residual": weights.frame_noise_residual,
+        "channel_corr": weights.frame_channel_corr, "temporal": weights.frame_temporal,
+    }
 
-    # Aggregate each path independently
-    face_score = aggregate_face_signals(face_analyses, weights)
-    frame_score = aggregate_frame_signals(frame_analyses, weights)
+    def _score_one(sig_dict: dict[str, float], wmap: dict[str, float]) -> float:
+        total_w = 0.0
+        wsum = 0.0
+        for name, w in wmap.items():
+            if name in sig_dict:
+                wsum += w * sig_dict[name]
+                total_w += w
+        return wsum / total_w if total_w > 0 else 0.0
 
-    face_active = len(face_analyses) > 0
+    def _agreement(sig_dict: dict[str, float], base: float) -> float:
+        dct_s = sig_dict.get("dct")
+        nr_s = sig_dict.get("noise_residual")
+        if dct_s is None or nr_s is None:
+            return base
+        if dct_s > 0.55 and nr_s > 0.55:
+            return float(np.clip(base + weights.agreement_bonus, 0.0, 1.0))
+        if (dct_s > 0.55 and nr_s < 0.40) or (nr_s > 0.55 and dct_s < 0.40):
+            return float(np.clip(base - weights.disagreement_penalty, 0.0, 1.0))
+        return base
 
-    # Combined score: determine dominant path
-    # When frame-path has overwhelming consensus (>70% flagged) and exceeds
-    # suspicious threshold, it wins regardless — this catches fully synthetic
-    # content where face-path scores are noise from small background faces.
+    face_scores = []
+    for sigs in face_signals:
+        s = _score_one(sigs, face_weight_map)
+        s = _agreement(sigs, s)
+        face_scores.append(s)
+
+    frame_scores = []
+    for sigs in frame_signals:
+        s = _score_one(sigs, frame_weight_map)
+        s = _agreement(sigs, s)
+        frame_scores.append(s)
+
+    k_face = max(weights.min_top_k, int(len(face_scores) * weights.top_k_ratio))
+    top_face = sorted(face_scores, reverse=True)[:k_face]
+    face_path_score = float(np.mean(top_face)) if face_scores else 0.0
+
+    k_frame = max(weights.min_top_k, int(len(frame_scores) * weights.top_k_ratio))
+    top_frame = sorted(frame_scores, reverse=True)[:k_frame]
+    frame_path_score = float(np.mean(top_frame)) if frame_scores else 0.0
+
+    face_active = len(face_scores) > 0
     frame_flagged_ratio = (
-        sum(1 for a in frame_analyses if a.flagged) / len(frame_analyses)
-        if frame_analyses else 0.0
+        sum(1 for s in frame_scores if s > weights.suspicious_threshold)
+        / len(frame_scores)
+        if frame_scores else 0.0
     )
     frame_consensus = (
         frame_flagged_ratio > 0.70
-        and frame_score >= weights.suspicious_threshold
+        and frame_path_score >= weights.suspicious_threshold
     )
 
     if frame_consensus:
-        video_score = frame_score
+        video_score = frame_path_score
         dominant_path = "frame"
-    elif face_active and face_score > frame_score:
-        video_score = face_score
+    elif face_active and face_path_score > frame_path_score:
+        video_score = face_path_score
         dominant_path = "face"
     else:
-        video_score = frame_score
+        video_score = frame_path_score
         dominant_path = "frame"
 
-    # Verdict
     if video_score >= weights.manipulated_threshold:
         verdict = Verdict.LIKELY_MANIPULATED
     elif video_score >= weights.suspicious_threshold:
@@ -377,44 +430,85 @@ def aggregate(
 
     confidence = _compute_confidence(video_score, weights)
 
-    # Manipulation type
-    manipulation_type = infer_manipulation_type(
-        face_score, frame_score, face_analyses, frame_analyses,
-    )
-
-    # Collect flagged indices (for GradCAM targeting)
-    flagged_face = [i for i, a in enumerate(face_analyses) if a.flagged]
-    flagged_frame = [i for i, a in enumerate(frame_analyses) if a.flagged]
-
-    result = VideoAnalysis(
-        face_analyses=face_analyses,
-        face_path_score=face_score,
-        face_path_active=face_active,
-        frame_analyses=frame_analyses,
-        frame_path_score=frame_score,
-        frame_path_active=True,
+    return ScoringResult(
+        face_path_score=face_path_score,
+        frame_path_score=frame_path_score,
         video_score=video_score,
         confidence=confidence,
         verdict=verdict,
-        manipulation_type=manipulation_type,
         dominant_path=dominant_path,
+        face_per_item_scores=face_scores,
+        frame_per_item_scores=frame_scores,
+    )
+
+
+def _signals_to_dict(signals: list[SignalScore]) -> dict[str, float]:
+    """Convert list of SignalScore to a flat {name: score} dict."""
+    return {s.name: s.score for s in signals}
+
+
+def aggregate(
+    face_analyses: list[FaceFrameAnalysis],
+    frame_analyses: list[FullFrameAnalysis],
+    weights: EnsembleWeights | None = None,
+) -> VideoAnalysis:
+    """
+    Main aggregation function: combine both paths into a single verdict.
+    Delegates all scoring to score_from_signals().
+    """
+    if weights is None:
+        weights = EnsembleWeights()
+
+    frame_sigs = [_signals_to_dict(a.signals) for a in frame_analyses]
+    face_sigs = [_signals_to_dict(a.signals) for a in face_analyses]
+
+    result = score_from_signals(frame_sigs, face_sigs, weights)
+
+    for i, a in enumerate(face_analyses):
+        a.ensemble_score = result.face_per_item_scores[i]
+        a.flagged = a.ensemble_score > weights.suspicious_threshold
+
+    for i, a in enumerate(frame_analyses):
+        a.ensemble_score = result.frame_per_item_scores[i]
+        a.flagged = a.ensemble_score > weights.suspicious_threshold
+
+    manipulation_type = infer_manipulation_type(
+        result.face_path_score, result.frame_path_score,
+        face_analyses, frame_analyses,
+    )
+
+    flagged_face = [i for i, a in enumerate(face_analyses) if a.flagged]
+    flagged_frame = [i for i, a in enumerate(frame_analyses) if a.flagged]
+
+    analysis = VideoAnalysis(
+        face_analyses=face_analyses,
+        face_path_score=result.face_path_score,
+        face_path_active=len(face_analyses) > 0,
+        frame_analyses=frame_analyses,
+        frame_path_score=result.frame_path_score,
+        frame_path_active=True,
+        video_score=result.video_score,
+        confidence=result.confidence,
+        verdict=result.verdict,
+        manipulation_type=manipulation_type,
+        dominant_path=result.dominant_path,
         flagged_face_indices=flagged_face,
         flagged_frame_indices=flagged_frame,
     )
 
     logger.info(
         "ensemble_aggregated",
-        face_score=f"{face_score:.3f}",
-        frame_score=f"{frame_score:.3f}",
-        video_score=f"{video_score:.3f}",
-        verdict=verdict.value,
+        face_score=f"{result.face_path_score:.3f}",
+        frame_score=f"{result.frame_path_score:.3f}",
+        video_score=f"{result.video_score:.3f}",
+        verdict=result.verdict.value,
         manipulation_type=manipulation_type.value,
-        dominant_path=dominant_path,
+        dominant_path=result.dominant_path,
         face_flagged=len(flagged_face),
         frame_flagged=len(flagged_frame),
     )
 
-    return result
+    return analysis
 
 
 def compute_signal_stats(analysis: VideoAnalysis) -> dict:
