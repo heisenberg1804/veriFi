@@ -67,6 +67,9 @@ benchmark = [
     "scikit-learn>=1.4",
     "matplotlib>=3.8",
 ]
+evalset = [
+    "google-genai>=1.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
