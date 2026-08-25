@@ -30,12 +30,14 @@ from verifi.detectors.clip_detector import CLIPDeepfakeDetector
 from verifi.detectors.effnet_detector import EfficientNetDetector
 from verifi.detectors.frequency import FrequencyAnalyzer
 from verifi.detectors.noise_residual import NoiseResidualAnalyzer
+from verifi.detectors.physics_reasoner import PhysicsReasoner
 from verifi.detectors.temporal import TemporalAnalyzer
 from verifi.ensemble.aggregator import (
     EnsembleWeights,
     FaceFrameAnalysis,
     FullFrameAnalysis,
     SignalScore,
+    Verdict,
     VideoAnalysis,
     aggregate,
     compute_signal_stats,
@@ -50,8 +52,13 @@ from verifi.explainability.heatmap_renderer import (
 )
 from verifi.ingestion.validator import validate_video
 from verifi.preprocessing.face_detector import FaceDetectionPipeline
-from verifi.sampling.frame_selector import SelectedFrame, select_frames
-from verifi.sampling.scene_detector import detect_scenes
+from verifi.sampling.frame_selector import (
+    SelectedFrame,
+    # SelectionResult,
+    _pass1_sequential_decode,
+    _pass2_load_pixels,
+    _select_indices,
+)
 
 logger = structlog.get_logger()
 
@@ -67,6 +74,7 @@ class StageTimings:
     frame_path_inference: float = 0.0
     temporal_analysis: float = 0.0
     ensemble: float = 0.0
+    physics_reasoning: float = 0.0
     gradcam: float = 0.0
     forensic_views: float = 0.0
     total: float = 0.0
@@ -86,9 +94,10 @@ class ForensicReport:
     timeline_path: str = ""
     timings: StageTimings = field(default_factory=StageTimings)
     output_dir: str = ""
+    low_sharpness_fallback: bool = False
 
     def summary(self) -> dict:
-        return {
+        d = {
             "video": self.video_metadata.get("filename", "unknown"),
             "duration": self.video_metadata.get("duration_sec", 0),
             **self.analysis.to_dict(),
@@ -97,6 +106,9 @@ class ForensicReport:
             "forensic_views_generated": len(self.forensic_view_paths),
             "timings": self.timings.to_dict(),
         }
+        if self.low_sharpness_fallback:
+            d["low_sharpness_fallback"] = True
+        return d
 
 
 class VeriFiPipeline:
@@ -123,6 +135,10 @@ class VeriFiPipeline:
         self._freq = FrequencyAnalyzer()
         self._noise_residual = NoiseResidualAnalyzer()
         self._temporal = TemporalAnalyzer()
+        self._physics = PhysicsReasoner(
+            backend=config.explainer.physics_backend,
+            ollama_model=config.explainer.physics_model,
+        )
         self._gradcam = GradCAMGenerator(device=self.device)
         self._models_loaded = False
 
@@ -208,27 +224,28 @@ class VeriFiPipeline:
 
         logger.info("pipeline_start", video=meta.filename, duration=f"{meta.duration_sec:.1f}s")
 
-        # ── Stage 2: Scene detection ──
+        # ── Stage 2: Pass 1 — sequential decode for stats + scene detection ──
         t0 = time.perf_counter()
-        scene_analysis = detect_scenes(
+        pass1 = _pass1_sequential_decode(
             video_path,
-            threshold=self.config.sampling.scene_threshold,
+            scene_threshold=self.config.sampling.scene_threshold,
         )
         timings.scene_detection = time.perf_counter() - t0
 
-        # ── Stage 3: Frame selection ──
+        # ── Stage 3: Select + Pass 2 — load pixels for selected frames ──
         t0 = time.perf_counter()
-        frames = select_frames(
-            video_path=video_path,
-            scene_analysis=scene_analysis,
+        selection = _select_indices(
+            pass1,
             frame_budget=self.config.sampling.frame_budget,
             transition_margin=self.config.sampling.transition_margin,
             min_laplacian_var=self.config.sampling.min_laplacian_var,
         )
+        frames = _pass2_load_pixels(video_path, selection.indices, pass1)
+        low_sharpness_fallback = selection.low_sharpness_fallback
         timings.frame_selection = time.perf_counter() - t0
 
         if not frames:
-            raise ValueError("No frames selected — video may be too short or too blurry")
+            raise ValueError("No frames selected — video may be too short")
 
         # ── Stage 4: Face detection ──
         t0 = time.perf_counter()
@@ -270,7 +287,23 @@ class VeriFiPipeline:
         signal_stats = compute_signal_stats(analysis)
         timings.ensemble = time.perf_counter() - t0
 
-        # ── Stage 9: GradCAM on flagged frames ──
+        # ── Stage 9: Physics reasoning (Tier 2) ──
+        if not skip_explainability and analysis.verdict != Verdict.LIKELY_AUTHENTIC:
+            t0 = time.perf_counter()
+            physics_result = self._run_physics_reasoning(frames, analysis)
+            timings.physics_reasoning = time.perf_counter() - t0
+
+            if physics_result and physics_result.num_frames_analyzed > 0:
+                combined = 0.60 * analysis.video_score + 0.40 * physics_result.aggregate_score
+                if combined >= self.config.ensemble.manipulated_threshold:
+                    analysis.verdict = Verdict.LIKELY_MANIPULATED
+                elif combined < self.config.ensemble.suspicious_threshold:
+                    analysis.verdict = Verdict.LIKELY_AUTHENTIC
+                analysis.video_score = combined
+                signal_stats["physics_score"] = round(physics_result.aggregate_score, 4)
+                signal_stats["physics_confidence"] = round(physics_result.confidence, 4)
+
+        # ── Stage 10: GradCAM on flagged frames ──
         heatmap_paths = []
         forensic_paths = []
         timeline_path = None
@@ -298,6 +331,7 @@ class VeriFiPipeline:
             timeline_path=str(timeline_path) if timeline_path else "",
             timings=timings,
             output_dir=str(output_dir),
+            low_sharpness_fallback=low_sharpness_fallback,
         )
 
         logger.info(
@@ -313,6 +347,8 @@ class VeriFiPipeline:
 
     # ── Internal pipeline stages ──
 
+    _BATCH_CHUNK = 32
+
     def _run_face_path(
         self,
         frames: list,  # list[SelectedFrame]
@@ -321,67 +357,73 @@ class VeriFiPipeline:
         """Path A: run detectors on face crops. Skips tiny crops."""
         from verifi.ensemble.aggregator import SignalScore
 
-        analyses = []
-        min_crop_pixels = 80  # minimum face crop dimension before upscale
+        min_crop_pixels = 80
 
+        face_entries = []
         for sf, fr in zip(frames, face_results):
             for face in fr.faces:
-                # Skip tiny faces — they produce EfficientNet artifacts
-                # when upscaled from e.g. 50x50 to 380x380
                 raw_h, raw_w = face.crop_raw.shape[:2]
-                is_small_face = raw_h < min_crop_pixels or raw_w < min_crop_pixels
+                is_small = raw_h < min_crop_pixels or raw_w < min_crop_pixels
+                face_entries.append((sf, face, is_small, raw_w, raw_h))
 
-                signals = []
+        if not face_entries:
+            logger.info("face_path_complete", num_analyses=0)
+            return []
 
-                # CLIP on face crop (always run)
-                clip_results = self._clip.predict([face.crop])
-                if clip_results:
+        all_crops = [e[1].crop for e in face_entries]
+        clip_scores = self._batched_predict(self._clip, all_crops)
+
+        effnet_crops = [e[1].crop for e in face_entries if not e[2]]
+        effnet_scores = self._batched_predict(self._effnet, effnet_crops) if effnet_crops else []
+
+        analyses = []
+        effnet_idx = 0
+        for i, (sf, face, is_small, raw_w, raw_h) in enumerate(face_entries):
+            signals = []
+
+            if clip_scores[i] is not None:
+                signals.append(SignalScore(
+                    name="clip", score=clip_scores[i].score,
+                    metadata=clip_scores[i].metadata,
+                ))
+
+            if not is_small:
+                if effnet_idx < len(effnet_scores) and effnet_scores[effnet_idx] is not None:
                     signals.append(SignalScore(
-                        name="clip", score=clip_results[0].score,
-                        metadata=clip_results[0].metadata,
+                        name="effnet", score=effnet_scores[effnet_idx].score,
                     ))
-
-                # EfficientNet on face crop — skip for tiny faces
-                if not is_small_face:
-                    effnet_results = self._effnet.predict([face.crop])
-                    if effnet_results:
-                        signals.append(SignalScore(
-                            name="effnet", score=effnet_results[0].score,
-                        ))
-                else:
-                    # Add a neutral score so ensemble weights still work
-                    signals.append(SignalScore(
-                        name="effnet", score=0.5,
-                        metadata={"skipped": True, "reason": "face_too_small",
-                                "raw_size": f"{raw_w}x{raw_h}"},
-                    ))
-
-                # DCT on face crop (with sharpness normalization)
-                face_gray = cv2.cvtColor(face.crop, cv2.COLOR_BGR2GRAY)
-                face_sharpness = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
-                dct_result = self._freq.analyze(face.crop, sharpness=face_sharpness)
+                effnet_idx += 1
+            else:
                 signals.append(SignalScore(
-                    name="dct", score=dct_result.score,
-                    metadata=dct_result.metadata,
-                ))
-                signals.append(SignalScore(
-                    name="channel_corr",
-                    score=dct_result.metadata.get("channel_corr_score", 0.5),
+                    name="effnet", score=0.5,
+                    metadata={"skipped": True, "reason": "face_too_small",
+                            "raw_size": f"{raw_w}x{raw_h}"},
                 ))
 
-                # Noise residual on face crop
-                nr_result = self._noise_residual.analyze(face.crop)
-                signals.append(SignalScore(
-                    name="noise_residual", score=nr_result.score,
-                    metadata=nr_result.metadata,
-                ))
+            face_gray = cv2.cvtColor(face.crop, cv2.COLOR_BGR2GRAY)
+            face_sharpness = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
+            dct_result = self._freq.analyze(face.crop, sharpness=face_sharpness)
+            signals.append(SignalScore(
+                name="dct", score=dct_result.score,
+                metadata=dct_result.metadata,
+            ))
+            signals.append(SignalScore(
+                name="channel_corr",
+                score=dct_result.metadata.get("channel_corr_score", 0.5),
+            ))
 
-                analyses.append(FaceFrameAnalysis(
-                    face_id=face.face_id,
-                    frame_idx=sf.frame_idx,
-                    timestamp_sec=sf.timestamp_sec,
-                    signals=signals,
-                ))
+            nr_result = self._noise_residual.analyze(face.crop)
+            signals.append(SignalScore(
+                name="noise_residual", score=nr_result.score,
+                metadata=nr_result.metadata,
+            ))
+
+            analyses.append(FaceFrameAnalysis(
+                face_id=face.face_id,
+                frame_idx=sf.frame_idx,
+                timestamp_sec=sf.timestamp_sec,
+                signals=signals,
+            ))
 
         logger.info("face_path_complete", num_analyses=len(analyses))
         return analyses
@@ -392,26 +434,22 @@ class VeriFiPipeline:
         frames: list[SelectedFrame],
     ) -> list[FullFrameAnalysis]:
         """Path B: run detectors on full frames (no face crop)."""
-        analyses = []
+        clip_size = self.config.detector.clip_input_size
+        resized = [
+            cv2.resize(sf.image, (clip_size, clip_size)) for sf in frames
+        ]
 
-        # Prepare full-frame crops at CLIP input size
-        for sf in frames:
+        clip_scores = self._batched_predict(self._clip, resized)
+
+        analyses = []
+        for i, sf in enumerate(frames):
             signals = []
 
-            # Resize full frame to CLIP input size
-            frame_resized = cv2.resize(
-                sf.image,
-                (self.config.detector.clip_input_size, self.config.detector.clip_input_size),
-            )
-
-            # CLIP on full frame
-            clip_results = self._clip.predict([frame_resized])
-            if clip_results:
+            if clip_scores[i] is not None:
                 signals.append(SignalScore(
-                    name="clip", score=clip_results[0].score,
+                    name="clip", score=clip_scores[i].score,
                 ))
 
-            # DCT on full frame (with sharpness normalization)
             frame_gray = cv2.cvtColor(sf.image, cv2.COLOR_BGR2GRAY)
             frame_sharpness = float(cv2.Laplacian(frame_gray, cv2.CV_64F).var())
             dct_result = self._freq.analyze(sf.image, sharpness=frame_sharpness)
@@ -424,7 +462,6 @@ class VeriFiPipeline:
                 score=dct_result.metadata.get("channel_corr_score", 0.5),
             ))
 
-            # Noise residual on full frame
             nr_result = self._noise_residual.analyze(sf.image)
             signals.append(SignalScore(
                 name="noise_residual", score=nr_result.score,
@@ -439,6 +476,14 @@ class VeriFiPipeline:
 
         logger.info("frame_path_complete", num_analyses=len(analyses))
         return analyses
+
+    def _batched_predict(self, detector, images: list[np.ndarray]):
+        """Run a detector on images in chunks of _BATCH_CHUNK, return flat results list."""
+        results = []
+        for start in range(0, len(images), self._BATCH_CHUNK):
+            chunk = images[start : start + self._BATCH_CHUNK]
+            results.extend(detector.predict(chunk))
+        return results
 
     def _run_temporal_analysis(
         self,
@@ -463,6 +508,42 @@ class VeriFiPipeline:
             pairs_analyzed += 1
 
         logger.info("temporal_analysis_complete", pairs=pairs_analyzed)
+
+    def _run_physics_reasoning(
+        self,
+        frames: list[SelectedFrame],
+        analysis: VideoAnalysis,
+    ):
+        """Run physics-based reasoning on selected frames."""
+        tier1_context = {
+            "video_score": round(analysis.video_score, 4),
+            "verdict": analysis.verdict.value,
+            "dominant_path": analysis.dominant_path,
+            "frame_scores": {
+                str(fa.frame_idx): round(fa.ensemble_score, 4)
+                for fa in analysis.frame_analyses
+            },
+        }
+
+        frame_images = [f.image for f in frames]
+        frame_indices = [f.frame_idx for f in frames]
+        timestamps = [f.timestamp_sec for f in frames]
+
+        try:
+            result = self._physics.analyze(
+                frame_images, frame_indices, timestamps, tier1_context
+            )
+            logger.info(
+                "physics_reasoning_complete",
+                score=f"{result.aggregate_score:.3f}",
+                confidence=f"{result.confidence:.3f}",
+                verdict=result.verdict_suggestion,
+                frames=result.num_frames_analyzed,
+            )
+            return result
+        except Exception as e:
+            logger.error("physics_reasoning_failed", error=str(e))
+            return None
 
     def _generate_heatmaps(
         self,
